@@ -2128,6 +2128,86 @@ func TestCheckAccessToDatabase(t *testing.T) {
 	}
 }
 
+func TestCheckAccessToDatabaseUser(t *testing.T) {
+	utils.InitLoggerForTests(testing.Verbose())
+	dbStage := types.NewDatabaseServerV3("stage",
+		map[string]string{"env": "stage"},
+		types.DatabaseServerSpecV3{})
+	dbProd := types.NewDatabaseServerV3("prod",
+		map[string]string{"env": "prod"},
+		types.DatabaseServerSpecV3{})
+	roleDevStage := &RoleV3{
+		Metadata: Metadata{Name: "dev-stage", Namespace: defaults.Namespace},
+		Spec: RoleSpecV3{
+			Allow: RoleConditions{
+				Namespaces:     []string{defaults.Namespace},
+				DatabaseLabels: Labels{"env": []string{"stage"}},
+				DatabaseUsers:  []string{Wildcard},
+			},
+			Deny: RoleConditions{
+				Namespaces:     []string{defaults.Namespace},
+				DatabaseLabels: Labels{"env": []string{"stage"}},
+				DatabaseUsers:  []string{"superuser"},
+			},
+		},
+	}
+	roleDevProd := &RoleV3{
+		Metadata: Metadata{Name: "dev-prod", Namespace: defaults.Namespace},
+		Spec: RoleSpecV3{
+			Allow: RoleConditions{
+				Namespaces:     []string{defaults.Namespace},
+				DatabaseLabels: Labels{"env": []string{"prod"}},
+				DatabaseUsers:  []string{"dev"},
+			},
+		},
+	}
+	type access struct {
+		server types.DatabaseServer
+		dbUser string
+		access bool
+	}
+	testCases := []struct {
+		name   string
+		roles  []*RoleV3
+		access []access
+	}{
+		{
+			name:  "developer allowed any username in stage database except one superuser",
+			roles: []*RoleV3{roleDevStage, roleDevProd},
+			access: []access{
+				{server: dbStage, dbUser: "superuser", access: false},
+				{server: dbStage, dbUser: "dev", access: true},
+				{server: dbStage, dbUser: "test", access: true},
+			},
+		},
+		{
+			name:  "developer allowed only specific username/database in prod database",
+			roles: []*RoleV3{roleDevStage, roleDevProd},
+			access: []access{
+				{server: dbProd, dbUser: "superuser", access: false},
+				{server: dbProd, dbUser: "dev", access: true},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var set RoleSet
+			for _, r := range tc.roles {
+				set = append(set, r)
+			}
+			for _, access := range tc.access {
+				err := set.CheckAccessToDatabaseUser(access.server, access.dbUser)
+				if access.access {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+					require.True(t, trace.IsAccessDenied(err))
+				}
+			}
+		})
+	}
+}
+
 func TestCheckDatabaseNamesAndUsers(t *testing.T) {
 	roleEmpty := &RoleV3{
 		Metadata: Metadata{Name: "roleA", Namespace: defaults.Namespace},
