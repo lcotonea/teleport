@@ -21,7 +21,6 @@ package web
 import (
 	"compress/gzip"
 	"context"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -92,6 +91,14 @@ func SetSessionStreamPollPeriod(period time.Duration) HandlerOption {
 	}
 }
 
+// SetClock sets the clock on a handler
+func SetClock(clock clockwork.Clock) HandlerOption {
+	return func(h *Handler) error {
+		h.clock = clock
+		return nil
+	}
+}
+
 // Config represents web handler configuration parameters
 type Config struct {
 	// Proxy is a reverse tunnel proxy that handles connections
@@ -103,8 +110,6 @@ type Config struct {
 	DomainName string
 	// ProxyClient is a client that authenticated as proxy
 	ProxyClient auth.ClientI
-	// DisableUI allows to turn off serving web based UI
-	DisableUI bool
 	// ProxySSHAddr points to the SSH address of the proxy
 	ProxySSHAddr utils.NetAddr
 	// ProxyWebAddr points to the web (HTTPS) address of the proxy
@@ -131,6 +136,10 @@ type Config struct {
 
 	// Context is used to signal process exit.
 	Context context.Context
+
+	// StaticFS optionally specifies the HTTP file system to use.
+	// Enables web UI if set.
+	StaticFS http.FileSystem
 }
 
 type RewritingHandler struct {
@@ -171,15 +180,10 @@ func (h *RewritingHandler) Close() error {
 // NewHandler returns a new instance of web proxy handler
 func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 	const apiPrefix = "/" + teleport.WebAPIVersion
-	lauth, err := newSessionCache(cfg.ProxyClient, []utils.NetAddr{cfg.AuthServers}, cfg.CipherSuites)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
 	h := &Handler{
-		cfg:  cfg,
-		auth: lauth,
-		log:  newPackageLogger(),
+		cfg:   cfg,
+		log:   newPackageLogger(),
+		clock: clockwork.NewRealClock(),
 	}
 
 	for _, o := range opts {
@@ -188,6 +192,18 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 		}
 	}
 
+	auth, err := newSessionCache(sessionCacheOptions{
+		proxyClient:  cfg.ProxyClient,
+		accessPoint:  cfg.AccessPoint,
+		servers:      []utils.NetAddr{cfg.AuthServers},
+		cipherSuites: cfg.CipherSuites,
+		clock:        h.clock,
+	})
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	h.auth = auth
+
 	_, sshPort, err := net.SplitHostPort(cfg.ProxySSHAddr.String())
 	if err != nil {
 		h.log.WithError(err).Warnf("Invalid SSH proxy address %q, will use default port %v.",
@@ -195,10 +211,6 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 		sshPort = strconv.Itoa(defaults.SSHProxyListenPort)
 	}
 	h.sshPort = sshPort
-
-	if h.clock == nil {
-		h.clock = clockwork.NewRealClock()
-	}
 
 	// ping endpoint is used to check if the server is up. the /webapi/ping
 	// endpoint returns the default authentication method and configuration that
@@ -299,16 +311,9 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 	h.POST("/webapi/host/credentials", httplib.MakeHandler(h.hostCredentials))
 
 	// if Web UI is enabled, check the assets dir:
-	var (
-		indexPage *template.Template
-		staticFS  http.FileSystem
-	)
-	if !cfg.DisableUI {
-		staticFS, err = NewStaticFileSystem(isDebugMode())
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		index, err := staticFS.Open("/index.html")
+	var indexPage *template.Template
+	if cfg.StaticFS != nil {
+		index, err := cfg.StaticFS.Open("/index.html")
 		if err != nil {
 			h.log.WithError(err).Error("Failed to open index file.")
 			return nil, trace.Wrap(err)
@@ -334,7 +339,7 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 		}
 
 		// request is going to the web UI
-		if cfg.DisableUI {
+		if cfg.StaticFS == nil {
 			w.WriteHeader(http.StatusNotImplemented)
 			return
 		}
@@ -348,7 +353,7 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 		// serve Web UI:
 		if strings.HasPrefix(r.URL.Path, "/web/app") {
 			httplib.SetStaticFileHeaders(w.Header())
-			http.StripPrefix("/web", http.FileServer(staticFS)).ServeHTTP(w, r)
+			http.StripPrefix("/web", http.FileServer(cfg.StaticFS)).ServeHTTP(w, r)
 		} else if strings.HasPrefix(r.URL.Path, "/web/") || r.URL.Path == "/web" {
 			csrfToken, err := csrf.AddCSRFProtection(w, r)
 			if err != nil {
@@ -364,9 +369,9 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 
 			ctx, err := h.AuthenticateRequest(w, r, false)
 			if err == nil {
-				re, err := NewSessionResponse(ctx)
+				resp, err := newSessionResponse(ctx)
 				if err == nil {
-					out, err := json.Marshal(re)
+					out, err := json.Marshal(resp)
 					if err == nil {
 						session.Session = base64.StdEncoding.EncodeToString(out)
 					}
@@ -936,7 +941,7 @@ func (h *Handler) githubCallback(w http.ResponseWriter, r *http.Request, p httpr
 			return nil, trace.AccessDenied("access denied")
 		}
 		logger.Infof("Callback is redirecting to web browser.")
-		err = SetSession(w, response.Username, response.Session.GetName())
+		err = SetSessionCookie(w, response.Username, response.Session.GetName())
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -1018,7 +1023,7 @@ func (h *Handler) oidcCallback(w http.ResponseWriter, r *http.Request, p httprou
 		}
 
 		logger.Info("Callback redirecting to web browser.")
-		if err := SetSession(w, response.Username, response.Session.GetName()); err != nil {
+		if err := SetSessionCookie(w, response.Username, response.Session.GetName()); err != nil {
 			return nil, trace.Wrap(err)
 		}
 		return nil, httplib.SafeRedirect(w, r, response.Req.ClientRedirectURL)
@@ -1153,6 +1158,12 @@ type CreateSessionReq struct {
 	SecondFactorToken string `json:"second_factor_token"`
 }
 
+// String returns text description of this response
+func (r *CreateSessionResponse) String() string {
+	return fmt.Sprintf("WebSession(type=%v,token=%v,expires=%vs)",
+		r.Type, r.Token, r.ExpiresIn)
+}
+
 // CreateSessionResponse returns OAuth compabible data about
 // access token: https://tools.ietf.org/html/rfc6749
 type CreateSessionResponse struct {
@@ -1164,13 +1175,13 @@ type CreateSessionResponse struct {
 	ExpiresIn int `json:"expires_in"`
 }
 
-func NewSessionResponse(ctx *SessionContext) (*CreateSessionResponse, error) {
+func newSessionResponse(ctx *SessionContext) (*CreateSessionResponse, error) {
 	clt, err := ctx.GetClient()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	webSession := ctx.GetWebSession()
-	user, err := clt.GetUser(webSession.GetUser(), false)
+	token := ctx.getToken()
+	user, err := clt.GetUser(ctx.GetUser(), false)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -1186,11 +1197,10 @@ func NewSessionResponse(ctx *SessionContext) (*CreateSessionResponse, error) {
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-
 	return &CreateSessionResponse{
 		Type:      roundtrip.AuthBearer,
-		Token:     webSession.GetBearerToken(),
-		ExpiresIn: int(time.Until(webSession.GetBearerTokenExpiryTime()) / time.Second),
+		Token:     token.GetName(),
+		ExpiresIn: int(token.Expiry().Sub(ctx.parent.clock.Now()) / time.Second),
 	}, nil
 }
 
@@ -1233,17 +1243,28 @@ func (h *Handler) createWebSession(w http.ResponseWriter, r *http.Request, p htt
 		return nil, trace.AccessDenied("bad auth credentials")
 	}
 
-	if err := SetSession(w, req.User, webSession.GetName()); err != nil {
+	// Block and wait a few seconds for the session that was created to show up
+	// in the cache. If this request is not blocked here, it can get stuck in a
+	// racy session creation loop.
+	err = h.waitForWebSession(r.Context(), services.GetWebSessionRequest{
+		User:      req.User,
+		SessionID: webSession.GetName(),
+	})
+	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	ctx, err := h.auth.ValidateSession(req.User, webSession.GetName())
+	if err := SetSessionCookie(w, req.User, webSession.GetName()); err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	ctx, err := h.auth.newSessionContext(req.User, webSession.GetName())
 	if err != nil {
 		h.log.WithError(err).Warnf("Access attempt denied for user %q.", req.User)
 		return nil, trace.AccessDenied("need auth")
 	}
 
-	return NewSessionResponse(ctx)
+	return newSessionResponse(ctx)
 }
 
 // deleteSession is called to sign out user
@@ -1281,21 +1302,18 @@ func (h *Handler) logout(w http.ResponseWriter, ctx *SessionContext) error {
 func (h *Handler) renewSession(w http.ResponseWriter, r *http.Request, params httprouter.Params, ctx *SessionContext) (interface{}, error) {
 	requestID := params.ByName("requestId")
 
-	newSess, err := ctx.ExtendWebSession(requestID)
+	newSession, err := ctx.extendWebSession(requestID)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	// transfer ownership over connections that were opened in the
-	// sessionContext
-	newContext, err := ctx.parent.ValidateSession(newSess.GetUser(), newSess.GetName())
+	newContext, err := h.auth.newSessionContextFromSession(newSession)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	newContext.AddClosers(ctx.TransferClosers()...)
-	if err := SetSession(w, newSess.GetUser(), newSess.GetName()); err != nil {
+	if err := SetSessionCookie(w, newSession.GetUser(), newSession.GetName()); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return NewSessionResponse(newContext)
+	return newSessionResponse(newContext)
 }
 
 func (h *Handler) changePasswordWithToken(w http.ResponseWriter, r *http.Request, p httprouter.Params) (interface{}, error) {
@@ -1308,27 +1326,27 @@ func (h *Handler) changePasswordWithToken(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	ctx, err := h.auth.ValidateSession(sess.GetUser(), sess.GetName())
+	ctx, err := h.auth.newSessionContext(sess.GetUser(), sess.GetName())
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if err := SetSession(w, sess.GetUser(), sess.GetName()); err != nil {
+	if err := SetSessionCookie(w, sess.GetUser(), sess.GetName()); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	return NewSessionResponse(ctx)
+	return newSessionResponse(ctx)
 }
 
 // createResetPasswordToken allows a UI user to reset a user's password.
 // This handler is also required for after creating new users.
 func (h *Handler) createResetPasswordToken(w http.ResponseWriter, r *http.Request, _ httprouter.Params, ctx *SessionContext) (interface{}, error) {
-	clt, err := ctx.GetClient()
-	if err != nil {
+	var req auth.CreateResetPasswordTokenRequest
+	if err := httplib.ReadJSON(r, &req); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	var req auth.CreateResetPasswordTokenRequest
-	if err := httplib.ReadJSON(r, &req); err != nil {
+	clt, err := ctx.GetClient()
+	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
@@ -1337,7 +1355,6 @@ func (h *Handler) createResetPasswordToken(w http.ResponseWriter, r *http.Reques
 			Name: req.Name,
 			Type: req.Type,
 		})
-
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -1450,14 +1467,14 @@ func (h *Handler) createSessionWithU2FSignResponse(w http.ResponseWriter, r *htt
 	if err != nil {
 		return nil, trace.AccessDenied("bad auth credentials")
 	}
-	if err := SetSession(w, req.User, sess.GetName()); err != nil {
+	if err := SetSessionCookie(w, req.User, sess.GetName()); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	ctx, err := h.auth.ValidateSession(req.User, sess.GetName())
+	ctx, err := h.auth.newSessionContext(req.User, sess.GetName())
 	if err != nil {
 		return nil, trace.AccessDenied("need auth")
 	}
-	return NewSessionResponse(ctx)
+	return newSessionResponse(ctx)
 }
 
 // getClusters returns a list of cluster and its data.
@@ -1531,7 +1548,7 @@ func (h *Handler) siteNodesGet(w http.ResponseWriter, r *http.Request, p httprou
 		return nil, trace.BadParameter("invalid namespace %q", namespace)
 	}
 
-	// Get a client to the Auth Server with the logged in users identity. The
+	// Get a client to the Auth Server with the logged in user's identity. The
 	// identity of the logged in user is used to fetch the list of nodes.
 	clt, err := ctx.GetUserClient(site)
 	if err != nil {
@@ -1551,7 +1568,7 @@ func (h *Handler) siteNodesGet(w http.ResponseWriter, r *http.Request, p httprou
 // GET /v1/webapi/sites/:site/namespaces/:namespace/connect?access_token=bearer_token&params=<urlencoded json-structure>
 //
 // Due to the nature of websocket we can't POST parameters as is, so we have
-// to add query parameters. The params query parameter is a url encodeed JSON strucrture:
+// to add query parameters. The params query parameter is a URL-encoded JSON structure:
 //
 // {"server_id": "uuid", "login": "admin", "term": {"h": 120, "w": 100}, "sid": "123"}
 //
@@ -1581,8 +1598,8 @@ func (h *Handler) siteNodeConnect(
 		return nil, trace.Wrap(err)
 	}
 
-	h.log.Debugf("New terminal request for ns=%s, server=%s, login=%s, sid=%s.",
-		req.Namespace, req.Server, req.Login, req.SessionID)
+	h.log.Debugf("New terminal request for ns=%s, server=%s, login=%s, sid=%s, websid=%s.",
+		req.Namespace, req.Server, req.Login, req.SessionID, ctx.GetSessionID())
 
 	authAccessPoint, err := site.CachingAccessPoint()
 	if err != nil {
@@ -1613,7 +1630,7 @@ func (h *Handler) siteNodeConnect(
 	}
 
 	// start the websocket session with a web-based terminal:
-	h.log.Infof("Getting terminal to '%#v'.", req)
+	h.log.Infof("Getting terminal to %#v.", req)
 	term.Serve(w, r)
 
 	return nil, nil
@@ -2221,12 +2238,12 @@ func (h *Handler) AuthenticateRequest(w http.ResponseWriter, r *http.Request, ch
 		}
 		return nil, trace.AccessDenied(missingCookieMsg)
 	}
-	d, err := DecodeCookie(cookie.Value)
+	decodedCookie, err := DecodeCookie(cookie.Value)
 	if err != nil {
 		logger.WithError(err).Warn("Failed to decode cookie.")
 		return nil, trace.AccessDenied("failed to decode cookie")
 	}
-	ctx, err := h.auth.ValidateSession(d.User, d.SID)
+	ctx, err := h.auth.validateSession(r.Context(), decodedCookie.User, decodedCookie.SID)
 	if err != nil {
 		logger.WithError(err).Warn("Invalid session.")
 		ClearSession(w)
@@ -2238,9 +2255,8 @@ func (h *Handler) AuthenticateRequest(w http.ResponseWriter, r *http.Request, ch
 			logger.WithError(err).Warn("No auth headers.")
 			return nil, trace.AccessDenied("need auth")
 		}
-
-		if subtle.ConstantTimeCompare([]byte(creds.Password), []byte(ctx.GetWebSession().GetBearerToken())) != 1 {
-			logger.Warn("Request failed: bad bearer token.")
+		if err := ctx.validateBearerToken(r.Context(), creds.Password); err != nil {
+			logger.WithError(err).Warn("Request failed: bad bearer token.")
 			return nil, trace.AccessDenied("bad bearer token")
 		}
 	}
