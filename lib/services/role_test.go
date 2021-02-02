@@ -2111,12 +2111,8 @@ func TestCheckAccessToDatabase(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var set RoleSet
-			for _, r := range tc.roles {
-				set = append(set, r)
-			}
 			for _, access := range tc.access {
-				err := set.CheckAccessToDatabase(access.server, access.dbName, access.dbUser)
+				err := tc.roles.CheckAccessToDatabase(access.server, access.dbName, access.dbUser)
 				if access.access {
 					require.NoError(t, err)
 				} else {
@@ -2191,12 +2187,8 @@ func TestCheckAccessToDatabaseUser(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var set RoleSet
-			for _, r := range tc.roles {
-				set = append(set, r)
-			}
 			for _, access := range tc.access {
-				err := set.CheckAccessToDatabaseUser(access.server, access.dbUser)
+				err := tc.roles.CheckAccessToDatabaseUser(access.server, access.dbUser)
 				if access.access {
 					require.NoError(t, err)
 				} else {
@@ -2284,11 +2276,7 @@ func TestCheckDatabaseNamesAndUsers(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var set RoleSet
-			for _, r := range tc.roles {
-				set = append(set, r)
-			}
-			names, users, err := set.CheckDatabaseNamesAndUsers(tc.ttl, tc.overrideTTL)
+			names, users, err := tc.roles.CheckDatabaseNamesAndUsers(tc.ttl, tc.overrideTTL)
 			if tc.accessDenied {
 				require.Error(t, err)
 				require.True(t, trace.IsAccessDenied(err))
@@ -2404,12 +2392,8 @@ func TestCheckAccessToDatabaseService(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var set RoleSet
-			for _, r := range tc.roles {
-				set = append(set, r)
-			}
 			for _, access := range tc.access {
-				err := set.CheckAccessToDatabaseServer(access.server)
+				err := tc.roles.CheckAccessToDatabaseServer(access.server)
 				if access.access {
 					require.NoError(t, err)
 				} else {
