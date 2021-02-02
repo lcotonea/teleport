@@ -2203,7 +2203,7 @@ func (tc *TeleportClient) applyProxySettings(proxySettings ProxySettings) error 
 		tc.SSHProxyAddr = net.JoinHostPort(addr.Host(), strconv.Itoa(addr.Port(defaults.SSHProxyListenPort)))
 	}
 
-	// Read MySQL proxy settings if it's enabled on the server.
+	// Read MySQL proxy settings if enabled on the server.
 	if proxySettings.DB.MySQLListenAddr != "" {
 		addr, err := utils.ParseAddr(proxySettings.DB.MySQLListenAddr)
 		if err != nil {

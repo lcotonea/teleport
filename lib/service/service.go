@@ -2714,7 +2714,7 @@ func (process *TeleportProcess) initProxyEndpoint(conn *Connector) error {
 		if err != nil {
 			return trace.Wrap(err)
 		}
-		log := logrus.WithField(trace.Component, teleport.Component(teleport.ComponentDatabase))
+		log := process.log.WithField(trace.Component, teleport.Component(teleport.ComponentDatabase))
 		if listeners.db != nil {
 			process.RegisterCriticalFunc("proxy.db", func() error {
 				log.Infof("Starting Database proxy server on %v.", cfg.Proxy.WebAddr.Addr)

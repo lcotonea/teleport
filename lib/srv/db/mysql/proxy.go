@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"time"
 
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/srv/db/common"
@@ -122,7 +123,7 @@ func (p *Proxy) performHandshake(server *server.Conn) (*tls.Conn, error) {
 	// see which database service to route the connection to.
 	tlsConn, ok := server.Conn.Conn.(*tls.Conn)
 	if !ok {
-		return nil, trace.BadParameter("expected tls connection")
+		return nil, trace.BadParameter("expected TLS connection")
 	}
 	return tlsConn, nil
 }
@@ -130,7 +131,15 @@ func (p *Proxy) performHandshake(server *server.Conn) (*tls.Conn, error) {
 // waitForOK waits for OK_PACKET from the database service which indicates
 // that auth on the other side completed successfully.
 func (p *Proxy) waitForOK(server *server.Conn, serviceConn net.Conn) error {
+	err := serviceConn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	if err != nil {
+		return trace.Wrap(err)
+	}
 	packet, err := protocol.ParsePacket(serviceConn)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	err = serviceConn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return trace.Wrap(err)
 	}

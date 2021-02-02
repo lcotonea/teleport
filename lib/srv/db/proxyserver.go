@@ -162,8 +162,7 @@ func (s *ProxyServer) ServeMySQL(listener net.Listener) error {
 			defer clientConn.Close()
 			err := s.mysqlProxy().HandleConnection(s.closeCtx, clientConn)
 			if err != nil {
-				s.log.Errorf("Failed to handle MySQL client connection: %v.",
-					trace.DebugReport(err))
+				s.log.WithError(err).Error("Failed to handle MySQL client connection.")
 			}
 		}()
 	}
@@ -237,11 +236,11 @@ func (s *ProxyServer) Connect(ctx context.Context, user, database string) (net.C
 	return serviceConn, nil
 }
 
-// Proxy starts proxying all traffic received from Postgres client between
+// Proxy starts proxying all traffic received from database client between
 // this proxy and Teleport database service over reverse tunnel.
 //
 // Implements common.Service.
-func (s *ProxyServer) Proxy(ctx context.Context, clientConn, serviceConn io.ReadWriteCloser) (retErr error) {
+func (s *ProxyServer) Proxy(ctx context.Context, clientConn, serviceConn io.ReadWriteCloser) error {
 	errCh := make(chan error, 2)
 	go func() {
 		defer s.log.Debug("Stop proxying from client to service.")

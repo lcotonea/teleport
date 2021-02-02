@@ -114,7 +114,7 @@ func (o *OptionFile) Env(name string) (map[string]string, error) {
 	// Due to this fact, we use the "option group suffix" which makes clients
 	// use speficic section from ~/.my.cnf file that has all these settings.
 	return map[string]string{
-		"MYSQL_GROUP_SUFFIX": o.suffix(name),
+		"MYSQL_GROUP_SUFFIX": suffix(name),
 	}, nil
 }
 
@@ -128,10 +128,10 @@ func (o *OptionFile) Delete(name string) error {
 //
 // Sections that are read by MySQL client start with "client" prefix.
 func (o *OptionFile) section(name string) string {
-	return "client" + o.suffix(name)
+	return "client" + suffix(name)
 }
 
-func (o *OptionFile) suffix(name string) string {
+func suffix(name string) string {
 	return "_" + name
 }
 

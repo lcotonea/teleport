@@ -146,7 +146,7 @@ func ReadPacket(conn net.Conn) (pkt []byte, pktType byte, err error) {
 
 	// Read the packet payload.
 	// TODO(r0mant): Couple of improvements could be made here:
-	// * Reuse buffers instead of allocating everything from scrach every time.
+	// * Reuse buffers instead of allocating everything from scratch every time.
 	// * Max payload size is 16Mb, support reading larger packets.
 	payload := make([]byte, payloadLen)
 	n, err := io.ReadFull(conn, payload)

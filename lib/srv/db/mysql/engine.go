@@ -168,7 +168,11 @@ func (e *Engine) connect(ctx context.Context, sessionCtx *common.Session) (*clie
 // receiveFromClient relays protocol messages received from MySQL client
 // to MySQL database.
 func (e *Engine) receiveFromClient(clientConn, serverConn net.Conn, clientErrCh chan<- error, sessionCtx *common.Session) {
-	log := e.Log.WithField("from", "client")
+	log := e.Log.WithFields(logrus.Fields{
+		"from":   "client",
+		"client": clientConn.RemoteAddr(),
+		"server": serverConn.RemoteAddr(),
+	})
 	defer log.Debug("Stop receiving from client.")
 	for {
 		packet, err := protocol.ParsePacket(clientConn)
@@ -199,7 +203,11 @@ func (e *Engine) receiveFromClient(clientConn, serverConn net.Conn, clientErrCh 
 // receiveFromServer relays protocol messages received from MySQL database
 // to MySQL client.
 func (e *Engine) receiveFromServer(serverConn, clientConn net.Conn, serverErrCh chan<- error) {
-	log := e.Log.WithField("from", "server")
+	log := e.Log.WithFields(logrus.Fields{
+		"from":   "server",
+		"client": clientConn.RemoteAddr(),
+		"server": serverConn.RemoteAddr(),
+	})
 	defer log.Debug("Stop receiving from server.")
 	for {
 		packet, err := protocol.ParsePacket(serverConn)
